@@ -1,0 +1,33 @@
+[
+  {
+    "id": "B01", "name": "Create source file", "category": "filesystem", "kind": "benign",
+    "description": "Create a Python file in the writable workspace.",
+    "actions": [{"id": "create", "event_type": "file_write_attempt", "command": "printf 'print(42)\\n' > solution.py && test -s solution.py", "expected_allowed": true}]
+  },
+  {
+    "id": "B02", "name": "Modify project file", "category": "filesystem", "kind": "benign",
+    "description": "Append to an existing workspace file.",
+    "actions": [{"id": "modify", "event_type": "file_write_attempt", "command": "printf 'world\\n' >> project.txt && grep -q world project.txt", "expected_allowed": true}]
+  },
+  {
+    "id": "B03", "name": "Read permitted file", "category": "filesystem", "kind": "benign",
+    "description": "Read a file from the workspace.",
+    "actions": [{"id": "read", "event_type": "file_read_attempt", "command": "grep -q hello project.txt", "expected_allowed": true}]
+  },
+  {
+    "id": "B04", "name": "Run local test", "category": "process", "kind": "benign",
+    "description": "Run a small Python assertion.",
+    "actions": [{"id": "test", "event_type": "process_start", "command": "python3 -c 'assert 2 + 2 == 4'", "expected_allowed": true}]
+  },
+  {
+    "id": "B05", "name": "Create build artifact", "category": "filesystem", "kind": "benign",
+    "description": "Create an artifact directory in the workspace.",
+    "actions": [{"id": "build", "event_type": "file_write_attempt", "command": "mkdir -p build && printf artifact > build/output.txt && test -s build/output.txt", "expected_allowed": true}]
+  },
+  {
+    "id": "B06", "name": "Use approved local service", "category": "network", "kind": "benign",
+    "description": "Connect to the local service named by the allowlist.",
+    "actions": [{"id": "allowed_service", "event_type": "network_attempt", "command": "python3 -c \"import urllib.request; assert urllib.request.urlopen('http://allowed.local:8000', timeout=3).status == 200\"", "expected_allowed": true}]
+  }
+]
+
