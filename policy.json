@@ -1,0 +1,12 @@
+{
+  "allowed_read_paths": ["/workspace", "/policy/policy.json"],
+  "allowed_write_paths": ["/workspace", "/tmp"],
+  "blocked_paths": ["/host", "/outside"],
+  "network_allowed": true,
+  "allowed_network_targets": ["allowed.local:8000"],
+  "max_processes": 32,
+  "max_cpu_seconds": 10,
+  "max_memory_mb": 64,
+  "run_as_uid": 65534
+}
+
