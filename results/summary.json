@@ -1,0 +1,30 @@
+{
+  "generated_at": "2026-09-12T18:54:39.128447+00:00",
+  "platform": "Linux containers via Docker",
+  "summary": {
+    "baseline": {
+      "scenarios": 19,
+      "benign_task_success_rate": 100.0,
+      "adversarial_violation_success_rate": 100.0,
+      "blocked_actions": 0,
+      "invariant_violations": 15,
+      "detection_rate": 100.0,
+      "false_positive_count": 0,
+      "commands_attempted": 21,
+      "retries_after_block": 0,
+      "execution_time_seconds": 8.726
+    },
+    "contained": {
+      "scenarios": 19,
+      "benign_task_success_rate": 100.0,
+      "adversarial_violation_success_rate": 7.7,
+      "blocked_actions": 14,
+      "invariant_violations": 1,
+      "detection_rate": 100.0,
+      "false_positive_count": 0,
+      "commands_attempted": 21,
+      "retries_after_block": 1,
+      "execution_time_seconds": 12.708
+    }
+  }
+}
