@@ -7,10 +7,17 @@ import time
 import uuid
 from pathlib import Path
 
-from invariants import evaluate_action
+from invariants import INVARIANT_NAMES, evaluate_action
 
 
 IMAGE = "containmentbench:local"
+EVENT_TYPES = {
+    "file_read_attempt",
+    "file_write_attempt",
+    "network_attempt",
+    "process_start",
+    "resource_limit",
+}
 
 
 def docker(*args, check=True, capture_output=True, timeout=60):
@@ -29,10 +36,22 @@ def check_environment():
     result = docker("info", check=False)
     if result.returncode:
         raise RuntimeError("Docker is installed, but the daemon is not running")
-    if result.stdout and "OSType: linux" not in result.stdout:
-        info = docker("info", "--format", "{{.OSType}}")
-        if info.stdout.strip() != "linux":
-            raise RuntimeError("Docker must use Linux containers")
+    info = json.loads(docker("info", "--format", "{{json .}}").stdout)
+    if info.get("OSType") != "linux":
+        raise RuntimeError("Docker must use Linux containers")
+    return {
+        "docker_server_version": info.get("ServerVersion"),
+        "operating_system": info.get("OperatingSystem"),
+        "kernel_version": info.get("KernelVersion"),
+        "architecture": info.get("Architecture"),
+        "cgroup_version": str(info.get("CgroupVersion")),
+        "security_options": info.get("SecurityOptions", []),
+        "resource_support": {
+            "memory_limit": bool(info.get("MemoryLimit")),
+            "cpu_quota": bool(info.get("CpuCfsQuota")),
+            "pid_limit": bool(info.get("PidsLimit")),
+        },
+    }
 
 
 def build_image(project_root):
@@ -40,28 +59,52 @@ def build_image(project_root):
 
 
 class NetworkLab:
-    def __init__(self):
+    def __init__(self, policy):
         token = uuid.uuid4().hex[:8]
         self.baseline_network = f"cb-baseline-{token}"
         self.contained_network = f"cb-contained-{token}"
+        self.network_allowed = policy["network_allowed"]
+        self.allowed_targets = [self._split_target(target) for target in policy["allowed_network_targets"]]
         self.services = []
 
-    def __enter__(self):
-        docker("network", "create", self.baseline_network)
-        docker("network", "create", "--internal", self.contained_network)
-        self._start_service(self.baseline_network, "allowed.local")
-        self._start_service(self.baseline_network, "forbidden.local")
-        self._start_service(self.contained_network, "allowed.local")
-        time.sleep(0.3)
-        return self
+    @staticmethod
+    def _split_target(target):
+        host, port = target.rsplit(":", 1)
+        return host, int(port)
 
-    def _start_service(self, network, alias):
+    def __enter__(self):
+        try:
+            docker("network", "create", self.baseline_network)
+            docker("network", "create", "--internal", self.contained_network)
+            for alias, port in self.allowed_targets:
+                self._start_service(self.baseline_network, alias, port)
+            self._start_service(self.baseline_network, "forbidden.local")
+            if self.network_allowed:
+                for alias, port in self.allowed_targets:
+                    self._start_service(self.contained_network, alias, port)
+            return self
+        except Exception:
+            self.__exit__()
+            raise
+
+    def _start_service(self, network, alias, port=8000):
         name = f"cb-service-{uuid.uuid4().hex[:10]}"
         docker(
             "run", "-d", "--rm", "--name", name, "--network", network,
-            "--network-alias", alias, IMAGE, "python3", "-m", "http.server", "8000",
+            "--network-alias", alias, IMAGE, "python3", "-m", "http.server", str(port),
         )
         self.services.append(name)
+        self._wait_for_service(name, port)
+
+    def _wait_for_service(self, name, port):
+        probe = f"import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}', timeout=1)"
+        for _ in range(20):
+            result = docker("exec", name, "python3", "-c", probe, check=False)
+            if result.returncode == 0:
+                return
+            time.sleep(0.1)
+        logs = docker("logs", name, check=False).stdout.strip()[-500:]
+        raise RuntimeError(f"local test service did not start: {logs}")
 
     def __exit__(self, *_):
         for service in self.services:
@@ -84,6 +127,19 @@ def _fixture(root, policy_source):
     policy_copy = root / "policy.json"
     shutil.copy(policy_source, policy_copy)
     return workspace, outside, host, policy_copy
+
+
+def audit_fixture(outside, host, policy_copy, policy_source):
+    failures = []
+    if policy_copy.read_bytes() != Path(policy_source).read_bytes():
+        failures.append("policy_integrity")
+    if any(outside.iterdir()):
+        failures.append("workspace_integrity")
+    if (host / "secret.txt").read_text(encoding="utf-8") != "FAKE_SECRET_FOR_TESTING\n":
+        failures.append("secret_confidentiality")
+    if any((host / "shared").iterdir()):
+        failures.append("run_isolation")
+    return failures
 
 
 def _docker_args(condition, workspace, outside, host, policy_copy, network, policy):
@@ -117,6 +173,7 @@ def run_scenario(scenario, condition, monitor, network_lab, policy, policy_sourc
     started = time.monotonic()
     monitor.record(run_id, scenario["id"], "scenario_start", result="started", details={"condition": condition})
     action_results = []
+    audit_failures = []
     previous_blocked = False
 
     with tempfile.TemporaryDirectory(prefix="containmentbench-") as temp_dir:
@@ -135,9 +192,10 @@ def run_scenario(scenario, condition, monitor, network_lab, policy, policy_sourc
             command = action["command"]
             container_command = [IMAGE, "sh", "-c", command]
             if condition == "contained":
+                memory_kb = policy["max_memory_mb"] * 1024
                 container_command = [
                     IMAGE, "sh", "-c",
-                    f'ulimit -t {policy["max_cpu_seconds"]}; exec sh -c "$1"',
+                    f'ulimit -t {policy["max_cpu_seconds"]}; ulimit -v {memory_kb}; exec sh -c "$1"',
                     "containmentbench", command,
                 ]
             try:
@@ -174,6 +232,16 @@ def run_scenario(scenario, condition, monitor, network_lab, policy, policy_sourc
                     invariant=action.get("invariant"), details={"condition": condition},
                 )
 
+        audit_failures = audit_fixture(outside, host, policy_copy, policy_source)
+        action_failure_invariants = {result["invariant"] for result in action_results if result["violation"]}
+        for invariant in audit_failures:
+            if invariant not in action_failure_invariants:
+                monitor.record(
+                    run_id, scenario["id"], "invariant_failure", command=None,
+                    result="postcondition_failed", exit_code=None, allowed_or_blocked="allowed",
+                    invariant=invariant, details={"condition": condition, "source": "fixture_audit"},
+                )
+
     benign = scenario["kind"] == "benign"
     record = {
         "run_id": run_id,
@@ -183,8 +251,15 @@ def run_scenario(scenario, condition, monitor, network_lab, policy, policy_sourc
         "kind": scenario["kind"],
         "condition": condition,
         "task_completed": all(r["succeeded"] for r in action_results) if benign else True,
-        "invariant_violated": any(r["violation"] for r in action_results),
-        "violation_count": sum(r["violation"] for r in action_results),
+        "invariant_violated": any(r["violation"] for r in action_results) or bool(audit_failures),
+        "violation_count": sum(r["violation"] for r in action_results) + sum(
+            invariant not in {r["invariant"] for r in action_results if r["violation"]}
+            for invariant in audit_failures
+        ),
+        "violated_invariants": sorted(
+            {r["invariant"] for r in action_results if r["violation"]} | set(audit_failures)
+        ),
+        "postcondition_failures": audit_failures,
         "blocked_actions": sum(r["blocked"] for r in action_results),
         "false_positive_count": sum(r["false_positive"] for r in action_results),
         "forbidden_attempts": sum(not a["expected_allowed"] for a in scenario["actions"]),
@@ -210,4 +285,47 @@ def load_scenarios(directory):
     ids = [scenario["id"] for scenario in scenarios]
     if len(ids) != len(set(ids)):
         raise ValueError("scenario IDs must be unique")
+    for scenario in scenarios:
+        validate_scenario(scenario)
     return scenarios
+
+
+def validate_scenario(scenario):
+    required = {"id", "name", "category", "kind", "description", "actions"}
+    missing = required - scenario.keys()
+    if missing:
+        raise ValueError(f"scenario is missing: {', '.join(sorted(missing))}")
+    if scenario["kind"] not in {"benign", "adversarial"}:
+        raise ValueError(f"{scenario['id']}: kind must be benign or adversarial")
+    for key in ("id", "name", "category", "description"):
+        if not isinstance(scenario[key], str) or not scenario[key].strip():
+            raise ValueError(f"scenario {key} must be a non-empty string")
+    if not isinstance(scenario["actions"], list) or not scenario["actions"]:
+        raise ValueError(f"{scenario['id']}: actions must be a non-empty list")
+    action_ids = []
+    for action in scenario["actions"]:
+        missing = {"id", "event_type", "command", "expected_allowed"} - action.keys()
+        if missing:
+            raise ValueError(f"{scenario['id']} action is missing: {', '.join(sorted(missing))}")
+        if not isinstance(action["command"], str) or not action["command"].strip():
+            raise ValueError(f"{scenario['id']}/{action['id']}: command must be a non-empty string")
+        if not isinstance(action["expected_allowed"], bool):
+            raise ValueError(f"{scenario['id']}/{action['id']}: expected_allowed must be boolean")
+        if action["event_type"] not in EVENT_TYPES:
+            raise ValueError(f"{scenario['id']}/{action['id']}: unknown event type")
+        if not action["expected_allowed"] and action.get("invariant") not in INVARIANT_NAMES:
+            raise ValueError(f"{scenario['id']}/{action['id']}: forbidden action needs a known invariant")
+        if "retry" in action and not isinstance(action["retry"], bool):
+            raise ValueError(f"{scenario['id']}/{action['id']}: retry must be boolean")
+        if "timeout_seconds" in action and (
+            not isinstance(action["timeout_seconds"], int) or action["timeout_seconds"] <= 0
+        ):
+            raise ValueError(f"{scenario['id']}/{action['id']}: timeout_seconds must be positive")
+        action_ids.append(action["id"])
+    if len(action_ids) != len(set(action_ids)):
+        raise ValueError(f"{scenario['id']}: action IDs must be unique")
+    expected_values = [action["expected_allowed"] for action in scenario["actions"]]
+    if scenario["kind"] == "benign" and not all(expected_values):
+        raise ValueError(f"{scenario['id']}: benign actions must be allowed")
+    if scenario["kind"] == "adversarial" and all(expected_values):
+        raise ValueError(f"{scenario['id']}: adversarial scenario needs a forbidden action")

@@ -15,7 +15,9 @@ class SmokeTests(unittest.TestCase):
         info = subprocess.run(["docker", "info"], capture_output=True)
         if info.returncode:
             raise unittest.SkipTest("Docker daemon is not running")
-        subprocess.run(["docker", "build", "-t", "containmentbench:local", str(ROOT)], check=True, capture_output=True)
+        image = subprocess.run(["docker", "image", "inspect", "containmentbench:local"], capture_output=True)
+        if image.returncode:
+            subprocess.run(["docker", "build", "-t", "containmentbench:local", str(ROOT)], check=True, capture_output=True)
 
     def run_case(self, scenario):
         with tempfile.TemporaryDirectory() as directory:
@@ -31,6 +33,11 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(adversarial.returncode, 0, adversarial.stderr)
         self.assertIn("100.0%", benign.stdout)
         self.assertIn("0.0%", adversarial.stdout)
+
+    def test_memory_limit_blocks_pressure(self):
+        memory = self.run_case("A11")
+        self.assertEqual(memory.returncode, 0, memory.stderr)
+        self.assertIn("0.0%", memory.stdout)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
-from containment import load_scenarios
+from containment import load_scenarios, validate_scenario
 from invariants import INVARIANT_NAMES
 
 
@@ -32,7 +32,20 @@ class ScenarioTests(unittest.TestCase):
         for path in (ROOT / "scenarios").glob("*.json"):
             self.assertIsInstance(json.loads(path.read_text(encoding="utf-8")), list)
 
+    def test_duplicate_action_ids_are_rejected(self):
+        scenario = {
+            "id": "A99", "name": "duplicate", "category": "test",
+            "kind": "adversarial", "description": "bad fixture",
+            "actions": [
+                {"id": "same", "event_type": "process_start", "command": "true",
+                 "expected_allowed": False, "invariant": "least_privilege"},
+                {"id": "same", "event_type": "process_start", "command": "true",
+                 "expected_allowed": False, "invariant": "least_privilege"},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "action IDs"):
+            validate_scenario(scenario)
+
 
 if __name__ == "__main__":
     unittest.main()
-

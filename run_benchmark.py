@@ -14,19 +14,38 @@ from policy import load_policy
 ROOT = Path(__file__).resolve().parent
 
 
-def write_results(records, summary, results_dir):
+def write_results(records, summary, results_dir, runtime, policy):
     results_dir.mkdir(parents=True, exist_ok=True)
     (results_dir / "runs.jsonl").write_text(
         "".join(json.dumps(record, sort_keys=True) + "\n" for record in records), encoding="utf-8"
     )
     document = {
+        "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "platform": "Linux containers via Docker",
+        "runtime": runtime,
+        "contained_controls": {
+            "read_only_root": True,
+            "non_root_uid": policy["run_as_uid"],
+            "capabilities_dropped": "all",
+            "no_new_privileges": True,
+            "custom_seccomp_profile": "seccomp.json",
+            "separate_pid_namespace": True,
+            "internal_allowlist_network": True,
+            "pids_limit": policy["max_processes"],
+            "docker_memory_limit_mb": policy["max_memory_mb"],
+            "rlimit_cpu_seconds": policy["max_cpu_seconds"],
+            "rlimit_address_space_mb": policy["max_memory_mb"],
+        },
         "summary": summary,
     }
     (results_dir / "summary.json").write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     with (results_dir / "summary.csv").open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=["condition", *next(iter(summary.values())).keys()])
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=["condition", *next(iter(summary.values())).keys()],
+            lineterminator="\n",
+        )
         writer.writeheader()
         for condition, metrics in summary.items():
             writer.writerow({"condition": condition, **metrics})
@@ -55,7 +74,7 @@ def main():
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
     args = parser.parse_args()
 
-    check_environment()
+    runtime = check_environment()
     if not args.skip_build:
         build_image(ROOT)
     policy = load_policy(ROOT / "policy.json")
@@ -68,7 +87,7 @@ def main():
     monitor = JsonlMonitor(args.results_dir / "events.jsonl")
     records = []
 
-    with NetworkLab() as network_lab:
+    with NetworkLab(policy) as network_lab:
         for condition in conditions:
             for scenario in scenarios:
                 print(f"[{condition}] {scenario['id']} {scenario['name']}")
@@ -77,7 +96,7 @@ def main():
                 )
 
     summary = summarize(records)
-    write_results(records, summary, args.results_dir)
+    write_results(records, summary, args.results_dir, runtime, policy)
     print_summary(summary)
 
 
